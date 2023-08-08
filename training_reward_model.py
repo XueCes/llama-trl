@@ -29,6 +29,7 @@ DEFAULT_UNK_TOKEN = "</s>"
 
 # Define and parse arguments.
 @dataclass
+# ScriptArguments类定义了训练所需的一些超参数,如batch size、学习率、训练epoch数等。这些参数可以通过命令行进行配置。
 class ScriptArguments:
     """
     These arguments vary depending on how many GPUs you have, what their capacity and features are, and what size model you want to train.
@@ -111,6 +112,7 @@ set_seed(script_args.seed)
 
 # We need to define a special data collator that batches the data in our j vs k format.
 @dataclass
+# RewardDataCollatorWithPadding是自定义的DataCollator,用于处理成对的数据。它会将一个batch中的data拆分成text_j和text_k两部分,分别进行padding和batching
 class RewardDataCollatorWithPadding:
     tokenizer: PreTrainedTokenizerBase
     padding: Union[bool, str, PaddingStrategy] = True
@@ -158,8 +160,7 @@ class RewardDataCollatorWithPadding:
         return batch
 
 
-# Turn the dataset into pairs of post + summaries, where text_j is the preferred question + answer and
-# text_k is the other. Then tokenize the dataset.
+# preprocess_function函数将原始数据集处理成成对的格式,其中text_j是较好的QA,text_k是较差的QA
 def preprocess_function(examples):
     new_examples = {
         "input_ids_j": [],
@@ -179,7 +180,7 @@ def preprocess_function(examples):
 
     return new_examples
 
-
+# compute_metrics定义了验证指标,这里简单地用text_j的奖励值大于text_k的比例作为准确率
 def compute_metrics(eval_pred):
     # Define the metric that we'll use for validation.
     accuracy = evaluate.load("accuracy")
@@ -191,18 +192,18 @@ def compute_metrics(eval_pred):
     labels = np.zeros(predictions.shape)
     return accuracy.compute(predictions=predictions, references=labels)
 
-
+# RewardTrainer自定义了compute_loss方法,实现了InstructGPT的成对logit差分损失函数
 class RewardTrainer(Trainer):
     # Define how to compute the reward loss. We use the InstructGPT pairwise logloss: https://arxiv.org/abs/2203.02155
     def compute_loss(self, model, inputs, return_outputs=False):
         rewards_j = model(input_ids=inputs["input_ids_j"], attention_mask=inputs["attention_mask_j"])[0]
         rewards_k = model(input_ids=inputs["input_ids_k"], attention_mask=inputs["attention_mask_k"])[0]
-        loss = -nn.functional.logsigmoid(rewards_j - rewards_k).mean()
+        loss = -nn.functional.logsigmoid(rewards_j - rewards_k).mean() # 公式
         if return_outputs:
             return loss, {"rewards_j": rewards_j, "rewards_k": rewards_k}
         return loss
 
-
+# 根据model_name是Llama还是其他model,加载对应的tokenizer。对Llama做了一些特殊处理,确保添加了必要的特殊token
 if "decapoda" in script_args.model_name.lower():
     tokenizer = LlamaTokenizer.from_pretrained(script_args.model_name)
     # required for llama
@@ -219,7 +220,7 @@ else:
     if getattr(tokenizer, "pad_token", None) is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-# Load the dataset for tuning the reward model.
+# 加载训练集和验证集的数据,默认从JSON文件加载,也可以直接从Hub加载
 data_path = script_args.dataset_name
 if data_path.endswith(".json") or data_path.endswith(".jsonl"):
     dataset = load_dataset("json", data_files=data_path, split="train")
@@ -229,16 +230,19 @@ dataset = dataset.train_test_split(test_size=0.1, seed=script_args.seed)
 train_dataset = dataset["train"]
 eval_dataset = dataset["test"]
 
+# 过train/eval_subset参数可以选择数据集的子集,方便debug
 if script_args.train_subset > 0:
     train_dataset = train_dataset.select(range(script_args.train_subset))
 if script_args.eval_subset > 0:
     eval_dataset = eval_dataset.select(range(script_args.eval_subset))
-# Define the training args. Needs to be done before the model is loaded if you are using deepspeed.
+
+# 构建输出目录的名称,包含了模型名称、使用的数据量等信息
 model_name_split = script_args.model_name.split("/")[-1]
 output_name = (
     f"{model_name_split}_peft_gpt-4-llm_rm_{script_args.train_subset}_{script_args.learning_rate}"
 )
 
+# 定义了PeFT的Lora配置,包括Lora的超参数如r、alpha等
 peft_config = LoraConfig(
     task_type=TaskType.SEQ_CLS,
     inference_mode=False,
@@ -246,7 +250,7 @@ peft_config = LoraConfig(
     lora_alpha=script_args.lora_alpha,
     lora_dropout=script_args.lora_dropout,
 )
-
+# 定义训练参数TrainingArguments,这里指定了模型保存频率,eval频率,优化器,学习率衰减等参数
 training_args = TrainingArguments(
     output_dir=os.path.join(script_args.output_dir, output_name),
     learning_rate=script_args.learning_rate,
@@ -272,17 +276,19 @@ training_args = TrainingArguments(
     lr_scheduler_type=script_args.lr_scheduler_type,
 )
 
+# 构建奖励模型,这里是用AutoModelForSequenceClassification,并应用PeFT的LoRA
 model = AutoModelForSequenceClassification.from_pretrained(
     script_args.model_name, num_labels=1, torch_dtype=torch.bfloat16
 )
 model = get_peft_model(model, peft_config)
 
+# 打印可训练的参数,并设置use_cache用于梯度checkpoint
 model.print_trainable_parameters()
 model.config.use_cache = script_args.gradient_checkpointing
 
 num_proc = 24  # Can adjust to be higher if you have more processors.
 original_columns = train_dataset.column_names
-# preprocess the dataset and filter out QAs that are longer than max_length
+# 对训练集和验证集进行预处理,限制序列长度
 train_dataset = train_dataset.map(
     preprocess_function, batched=True, num_proc=num_proc, remove_columns=original_columns
 )
@@ -294,7 +300,7 @@ eval_dataset = eval_dataset.map(
 eval_dataset = eval_dataset.filter(
     lambda x: len(x["input_ids_j"]) <= script_args.max_length and len(x["input_ids_k"]) <= script_args.max_length)
 
-# Train the model
+# 使用自定义的Trainer进行训练
 trainer = RewardTrainer(
     model=model,
     args=training_args,

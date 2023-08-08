@@ -18,7 +18,7 @@ from trl.trainer import ConstantLengthDataset
 
 from utils.merge import merge_llm_with_lora
 
-
+# 定义了一些训练所需的超参数
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base_model", type=str, default="")
@@ -62,10 +62,10 @@ def get_args():
 
     return parser.parse_args()
 
-
+# chars_token_ratio用于统计数据集中字符与token的比例
 def chars_token_ratio(dataset, tokenizer, nb_examples=400):
     """
-    Estimate the average number of characters per token in the dataset.
+    遍历一定数量的样本,计算每个样本文本的字符数和token数,最后返回字符数除以token数的平均值
     """
     total_characters, total_tokens = 0, 0
     for _, example in tqdm(zip(range(nb_examples), iter(dataset)), total=nb_examples):
@@ -78,10 +78,12 @@ def chars_token_ratio(dataset, tokenizer, nb_examples=400):
 
     return total_characters / total_tokens
 
-
+# print_trainable_parameters用于打印模型中可训练参数的数量
 def print_trainable_parameters(model):
     """
-    Prints the number of trainable parameters in the model.
+    它会遍历模型的所有参数,统计参数总数all_param。
+    同时统计requires_grad=True的参数数作为可训练参数个数trainable_params。
+    最后打印出这两个统计结果和可训练参数所占的比例  
     """
     trainable_params = 0
     all_param = 0
@@ -93,7 +95,7 @@ def print_trainable_parameters(model):
         f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}"
     )
 
-
+# prepare_sample_text将数据转换为prompt的格式
 def prepare_sample_text(data_point):
     """Prepare the text from a sample of the dataset."""
     if data_point["input"]:
@@ -116,7 +118,7 @@ def prepare_sample_text(data_point):
 ### Response:
 {data_point["output"]}"""
 
-
+# create_datasets加载数据,并转换为ConstantLengthDataset
 def create_datasets(tokenizer, args):
     data_path = args.dataset_name
     data_kwargs = {
@@ -164,7 +166,7 @@ def create_datasets(tokenizer, args):
 
 def run_training(args, train_data, val_data, tokenizer=None):
     print("Loading the model")
-
+    # 加载LLM,应用PeFT中的LoRA模块
     lora_config = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -177,7 +179,7 @@ def run_training(args, train_data, val_data, tokenizer=None):
     train_data.start_iteration = 0
 
     print("Starting main loop")
-
+    # 定义TrainingArguments
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         dataloader_drop_last=True,
@@ -235,7 +237,7 @@ def run_training(args, train_data, val_data, tokenizer=None):
             set_peft_model_state_dict(model, adapters_weights)
         else:
             print(f"Checkpoint {checkpoint_name} not found")
-
+    # 用SFTTrainer进行训练,它会自动应用prompt模板并计算length loss
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -259,7 +261,7 @@ def run_training(args, train_data, val_data, tokenizer=None):
     if args.merge_lora:
         merge_llm_with_lora(args.base_model, final_model_path, args.output_dir)
 
-
+# main函数负责解析参数,加载数据,然后调用 run_training 进行训练
 def main(args):
     if "decapoda" in args.base_model.lower():
         tokenizer = LlamaTokenizer.from_pretrained(args.base_model)
