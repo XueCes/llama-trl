@@ -118,8 +118,9 @@ class RewardDataCollatorWithPadding:
     padding: Union[bool, str, PaddingStrategy] = True
     max_length: Optional[int] = None
     pad_to_multiple_of: Optional[int] = None
-    return_tensors: str = "pt"
+    return_tensors: str = "pt"  # return_tensors='pt'可以直接返回PyTorch张量输入给模型
 
+    # 在__call__方法中将输入的特征列表features拆分为两个部分:features_j和features_k
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         features_j = []
         features_k = []
@@ -127,7 +128,7 @@ class RewardDataCollatorWithPadding:
             features_j.append(
                 {
                     "input_ids": feature["input_ids_j"],
-                    "attention_mask": feature["attention_mask_j"],
+                    "attention_mask": feature["attention_mask_j"],  # attention_mask记录了实际输入的位置
                 }
             )
             features_k.append(
@@ -136,6 +137,7 @@ class RewardDataCollatorWithPadding:
                     "attention_mask": feature["attention_mask_k"],
                 }
             )
+        # padding操作能够使得不同长度的输入对齐到统一长度
         batch_j = self.tokenizer.pad(
             features_j,
             padding=self.padding,
@@ -160,7 +162,7 @@ class RewardDataCollatorWithPadding:
         return batch
 
 
-# preprocess_function函数将原始数据集处理成成对的格式,其中text_j是较好的QA,text_k是较差的QA
+# preprocess_function函数预处理奖励学习任务数据集的函数
 def preprocess_function(examples):
     new_examples = {
         "input_ids_j": [],
@@ -168,6 +170,7 @@ def preprocess_function(examples):
         "input_ids_k": [],
         "attention_mask_k": [],
     }
+    # 遍历原始示例,每个示例包含user_input(问题)、completion_a和completion_b(两个候选响应)
     for question, response_j, response_k in zip(examples["user_input"], examples["completion_a"],
                                                 examples["completion_b"]):
         tokenized_j = tokenizer(question + response_j, truncation=True)
@@ -183,22 +186,23 @@ def preprocess_function(examples):
 # compute_metrics定义了验证指标,这里简单地用text_j的奖励值大于text_k的比例作为准确率
 def compute_metrics(eval_pred):
     # Define the metric that we'll use for validation.
-    accuracy = evaluate.load("accuracy")
-
+    accuracy = evaluate.load("accuracy")  # 从evaluate模块加载Accuracy metric
+    # 从eval_pred中获得预测结果predictions,其中包含奖励模型对两个候选响应的预测rewards_j和rewards_k
     predictions, _ = eval_pred
-    # Here, predictions is rewards_j and rewards_k.
-    # We want to see how much of the time rewards_j > rewards_k.
-    predictions = np.argmax(predictions, axis=0)
-    labels = np.zeros(predictions.shape)
+
+    predictions = np.argmax(predictions, axis=0)    # 通过np.argmax获得rewards_j和rewards_k中的最大值所对应的索引,作为预测结果
+    labels = np.zeros(predictions.shape)    # 构建一个全0的labels。
+    # 将predictions与labels一起输入accuracy.compute,计算预测rewards_j > rewards_k的比例
     return accuracy.compute(predictions=predictions, references=labels)
 
-# RewardTrainer自定义了compute_loss方法,实现了InstructGPT的成对logit差分损失函数
+# RewardTrainer用于训练奖励学习模型
 class RewardTrainer(Trainer):
     # Define how to compute the reward loss. We use the InstructGPT pairwise logloss: https://arxiv.org/abs/2203.02155
+    # compute_loss中定义了计算loss的方法
     def compute_loss(self, model, inputs, return_outputs=False):
         rewards_j = model(input_ids=inputs["input_ids_j"], attention_mask=inputs["attention_mask_j"])[0]
         rewards_k = model(input_ids=inputs["input_ids_k"], attention_mask=inputs["attention_mask_k"])[0]
-        loss = -nn.functional.logsigmoid(rewards_j - rewards_k).mean() # 公式
+        loss = -nn.functional.logsigmoid(rewards_j - rewards_k).mean()  # 公式
         if return_outputs:
             return loss, {"rewards_j": rewards_j, "rewards_k": rewards_k}
         return loss
@@ -230,15 +234,16 @@ dataset = dataset.train_test_split(test_size=0.1, seed=script_args.seed)
 train_dataset = dataset["train"]
 eval_dataset = dataset["test"]
 
-# 过train/eval_subset参数可以选择数据集的子集,方便debug
+# 如果指定了train_subset参数,则从训练数据集中采样指定数目的样本
 if script_args.train_subset > 0:
     train_dataset = train_dataset.select(range(script_args.train_subset))
+# 如果指定了eval_subset参数,则从验证数据集中采样指定数目的样本
 if script_args.eval_subset > 0:
     eval_dataset = eval_dataset.select(range(script_args.eval_subset))
 
 # 构建输出目录的名称,包含了模型名称、使用的数据量等信息
 model_name_split = script_args.model_name.split("/")[-1]
-output_name = (
+output_name = (  # 构建输出目录名output_name
     f"{model_name_split}_peft_gpt-4-llm_rm_{script_args.train_subset}_{script_args.learning_rate}"
 )
 
